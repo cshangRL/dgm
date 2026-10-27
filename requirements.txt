@@ -1,9 +1,5 @@
 datasets
-anthropic
-anthropic[bedrock]
 backoff
-botocore
-boto3
 openai
 
 # SWE-Bench

@@ -1,14 +1,12 @@
 
 import argparse
-import subprocess
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 import threading
 
-from llm_withtools import CLAUDE_MODEL, OPENAI_MODEL, chat_with_agent
-from utils.eval_utils import get_report_score, msg_history_to_report, score_tie_breaker
-from utils.git_utils import diff_versus_commit, reset_to_commit, apply_patch
+from llm_withtools import chat_with_agent
+from utils.git_utils import diff_versus_commit
 
 # Thread-local storage for logger instances
 thread_local = threading.local()
@@ -82,7 +80,7 @@ class AgenticSystem:
         self.test_description = test_description
         self.self_improve = self_improve
         self.instance_id = instance_id if not self_improve else 'dgm'
-        self.code_model = CLAUDE_MODEL
+        self.code_model = 'local'
 
         # Initialize logger and store it in thread-local storage
         self.logger = setup_logger(chat_history_file)
@@ -94,61 +92,6 @@ class AgenticSystem:
     def get_current_edits(self):
         diff = str(diff_versus_commit(self.git_tempdir, self.base_commit))
         return diff
-
-    def get_regression_tests(self):
-        """
-        Get the regression tests from the repository.
-        """
-        instruction = f"""I have uploaded a Python code repository in the directory {self.git_tempdir}.
-
-<problem_description>
-{self.problem_statement}
-</problem_description>
-
-<test_description>
-{self.test_description}
-</test_description>
-
-Your task is to identify regression tests in the {self.git_tempdir} directory that should pass both before and after addressing the <problem_description>. I have already taken care of the required dependencies.
-At the end, please provide a summary that includes where the regression tests are located, what they are testing, and how they can be executed.
-"""
-
-        new_msg_history = chat_with_agent(instruction, model=self.code_model, msg_history=[], logging=safe_log)
-        regression_tests_summary = new_msg_history[-1]
-        try:
-            regression_tests_summary = regression_tests_summary['content'][-1]['text']
-        except:
-            pass
-        return regression_tests_summary
-
-    def run_regression_tests(self, regression_tests_summary):
-        """
-        Run the regression tests and get the test report.
-        """
-        code_diff = self.get_current_edits()
-        instruction = f"""I have uploaded a Python code repository in the directory {self.git_tempdir}. There is an attempt to address the problem statement. Please review the changes and run the regression tests.
-
-<problem_description>
-{self.problem_statement}
-</problem_description>
-
-<attempted_solution>
-{code_diff}
-</attempted_solution>
-
-<test_description>
-{self.test_description}
-</test_description>
-
-<regression_tests_summary>
-{regression_tests_summary}
-</regression_tests_summary>
-
-Your task is to run the regression tests in the {self.git_tempdir} directory to ensure that the changes made to the code address the <problem_description>.
-"""
-        new_msg_history = chat_with_agent(instruction, model=self.code_model, msg_history=[], logging=safe_log)
-        test_report = msg_history_to_report(self.instance_id, new_msg_history, model=self.code_model)
-        return test_report
 
     def forward(self):
         """

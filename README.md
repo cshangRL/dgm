@@ -23,9 +23,12 @@ Repository for **Darwin Gödel Machine (DGM)**, a novel self-improving system th
 
 ## Setup
 ```bash
-# API keys, add to ~/.bashrc
-export OPENAI_API_KEY='...'
-export ANTHROPIC_API_KEY='...'
+# Local LLM endpoint, add to ~/.bashrc
+export LOCAL_LLM_BASE_URL='http://mydgx0:8888/v1'
+export LOCAL_LLM_MODEL='DeepSeek-V4.1-Flash-1017'
+export LOCAL_LLM_API_KEY='local'
+# Containers may need a different URL than the host; see doc/05-local-llm.md
+# export LOCAL_LLM_BASE_URL_CONTAINER='http://host.docker.internal:8899/v1'
 ```
 
 ```bash

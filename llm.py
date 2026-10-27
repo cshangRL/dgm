@@ -3,172 +3,63 @@ import json
 import os
 import re
 
-import anthropic
 import backoff
 import openai
 
-MAX_OUTPUT_TOKENS = 4096
-AVAILABLE_LLMS = [
-    # Anthropic models
-    "claude-3-5-sonnet-20240620",
-    "claude-3-5-sonnet-20241022",
-    # OpenAI models
-    "gpt-4o-mini-2024-07-18",
-    "gpt-4o-2024-05-13",
-    "gpt-4o-2024-08-06",
-    "o1-preview-2024-09-12",
-    "o1-mini-2024-09-12",
-    "o1-2024-12-17",
-    "o3-mini-2025-01-31",
-    # OpenRouter models
-    "llama3.1-405b",
-    # Anthropic Claude models via Amazon Bedrock
-    "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
-    "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-    "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
-    "bedrock/anthropic.claude-3-opus-20240229-v1:0",
-    "bedrock/us.anthropic.claude-3-5-sonnet-20241022-v2:0",
-    # Anthropic Claude models Vertex AI
-    "vertex_ai/claude-3-opus@20240229",
-    "vertex_ai/claude-3-5-sonnet@20240620",
-    "vertex_ai/claude-3-5-sonnet-v2@20241022",
-    "vertex_ai/claude-3-sonnet@20240229",
-    "vertex_ai/claude-3-haiku@20240307",
-    # DeepSeek models
-    "deepseek-chat",
-    "deepseek-coder",
-    "deepseek-reasoner",
-]
+# The repo only supports a local LLM endpoint (Chat Completions compatible).
+LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://mydgx0:8888/v1")
+LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "local")
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "DeepSeek-V4.1-Flash-1017")
+LOCAL_LLM_MAX_TOKENS = int(os.getenv("LOCAL_LLM_MAX_TOKENS", "8192"))
+# Reasoning models may spend the whole output budget on reasoning and return an
+# empty `content`, which breaks every content-based parser in this repo.
+# Disable thinking by default; set LOCAL_LLM_DISABLE_THINKING=0 to keep it.
+LOCAL_LLM_DISABLE_THINKING = os.getenv("LOCAL_LLM_DISABLE_THINKING", "1").lower() not in ("0", "false", "no")
 
-def create_client(model: str):
+
+def is_local_model(model: str) -> bool:
+    """True for the local provider: "local" or "local/<model-id>"."""
+    return model == "local" or model.startswith("local/")
+
+
+def local_model_id(model: str) -> str:
+    """Resolve the served model id for the local provider."""
+    if model == "local":
+        return os.getenv("LOCAL_LLM_MODEL", LOCAL_LLM_MODEL)
+    return model.split("/", 1)[1]
+
+
+def local_request_options() -> dict:
+    """Extra Chat Completions kwargs for the local provider."""
+    options = {"max_tokens": int(os.getenv("LOCAL_LLM_MAX_TOKENS", LOCAL_LLM_MAX_TOKENS))}
+    if os.getenv("LOCAL_LLM_DISABLE_THINKING", "1").lower() not in ("0", "false", "no"):
+        # Honored by vLLM/SGLang-style servers; harmless elsewhere.
+        options["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+    return options
+
+
+def create_client(model: str = "local"):
     """
-    Create and return an LLM client based on the specified model.
+    Create and return the local LLM client.
+
     Args:
-        model (str): The name of the model to use.
+        model (str): "local" (uses LOCAL_LLM_MODEL) or "local/<served-model-id>".
     Returns:
-        Tuple[Any, str]: A tuple containing the client instance and the client model name.
+        Tuple[Any, str]: the client and the model selector (kept with its prefix
+        so downstream code can route on it).
     """
-    if model.startswith("claude-"):
-        print(f"Using Anthropic API with model {model}.")
-        return anthropic.Anthropic(), model
-    elif model.startswith("bedrock") and "claude" in model:
-        client_model = model.split("/")[-1]
-        print(f"Using Amazon Bedrock with model {client_model}.")
-        client = anthropic.AnthropicBedrock(
-            aws_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            aws_region=os.getenv("AWS_REGION_NAME"),
+    if not is_local_model(model):
+        raise ValueError(
+            f"Only the local provider is supported; got model={model!r}. "
+            "Use 'local' or 'local/<served-model-id>'."
         )
-        return client, client_model
-    elif model.startswith("vertex_ai") and "claude" in model:
-        client_model = model.split("/")[-1]
-        print(f"Using Vertex AI with model {client_model}.")
-        return anthropic.AnthropicVertex(), client_model
-    elif 'gpt' in model or model.startswith("o1-") or model.startswith("o3-"):
-        print(f"Using OpenAI API with model {model}.")
-        return openai.OpenAI(), model
-    elif model.startswith("deepseek-"):
-        print(f"Using OpenAI API with {model}.")
-        client = openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url="https://api.deepseek.com"
-        )
-        return client, model
-    elif model == "llama3.1-405b":
-        print(f"Using OpenAI API with {model}.")
-        client = openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1"
-        ), model
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    base_url = os.getenv("LOCAL_LLM_BASE_URL", LOCAL_LLM_BASE_URL)
+    api_key = os.getenv("LOCAL_LLM_API_KEY", LOCAL_LLM_API_KEY)
+    print(f"Using local LLM endpoint {base_url} with model {local_model_id(model)}.")
+    return openai.OpenAI(base_url=base_url, api_key=api_key), model
 
-# Get N responses from a single message, used for ensembling.
-@backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))
-def get_batch_responses_from_llm(
-        msg,
-        client,
-        model,
-        system_message,
-        print_debug=False,
-        msg_history=None,
-        temperature=0.75,
-        n_responses=1,
-):
-    if msg_history is None:
-        msg_history = []
 
-    if model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-mini-2024-07-18",
-        "gpt-4o-2024-08-06",
-    ]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            n=n_responses,
-            stop=None,
-            seed=0,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    elif model == "llama-3-1-405b-instruct":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            n=n_responses,
-            stop=None,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    else:
-        content, new_msg_history = [], []
-        for _ in range(n_responses):
-            c, hist = get_response_from_llm(
-                msg,
-                client,
-                model,
-                system_message,
-                print_debug=False,
-                msg_history=None,
-                temperature=temperature,
-            )
-            content.append(c)
-            new_msg_history.append(hist)
-
-    if print_debug:
-        print()
-        print("*" * 20 + " LLM START " + "*" * 20)
-        for j, msg in enumerate(new_msg_history[0]):
-            print(f'{j}, {msg["role"]}: {msg["content"]}')
-        print(content)
-        print("*" * 21 + " LLM END " + "*" * 21)
-        print()
-
-    return content, new_msg_history
-
-@backoff.on_exception(
-    backoff.expo,
-    (openai.RateLimitError, openai.APITimeoutError, anthropic.RateLimitError, anthropic.APIStatusError),
-    max_time=120,
-)
+@backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError), max_time=120)
 def get_response_from_llm(
         msg,
         client,
@@ -181,118 +72,19 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if "claude" in model:
-        new_msg_history = msg_history + [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg,
-                    }
-                ],
-            }
-        ]
-        response = client.messages.create(
-            model=model,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            temperature=temperature,
-            system=system_message,
-            messages=new_msg_history,
-        )
-        content = response.content[0].text
-        new_msg_history = new_msg_history + [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content,
-                    }
-                ],
-            }
-        ]
-    elif model.startswith("gpt-4o-"):
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model.startswith("o1-") or model.startswith("o3-"):
-        new_msg_history = msg_history + [{"role": "user", "content": system_message + msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                # {"role": "user", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=1,
-            # max_completion_tokens=MAX_OUTPUT_TOKENS,
-            n=1,
-            # stop=None,
-            seed=0,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["deepseek-chat", "deepseek-coder"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            n=1,
-            stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["deepseek-reasoner"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            n=1,
-            stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        reasoning_content = response.choices[0].message.reasoning_content
-    elif model.startswith("llama3.1-"):
-        llama_size = model.split("-")[-1]
-        client_model = f"meta-llama/llama-3.1-{llama_size}-instruct"
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=client_model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_OUTPUT_TOKENS,
-            n=1,
-            stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-        resoning_content = response.choices[0].message.reasoning_content
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    new_msg_history = msg_history + [{"role": "user", "content": msg}]
+    response = client.chat.completions.create(
+        model=local_model_id(model),
+        messages=[
+            {"role": "system", "content": system_message},
+            *new_msg_history,
+        ],
+        temperature=temperature,
+        **local_request_options(),
+    )
+    content = response.choices[0].message.content or ""
+    new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+
     if print_debug:
         print()
         print("*" * 20 + " LLM START " + "*" * 20)
@@ -302,29 +94,30 @@ def get_response_from_llm(
         print()
     return content, new_msg_history
 
+
 def extract_json_between_markers(llm_output):
     inside_json_block = False
     json_lines = []
-    
+
     # Split the output into lines and iterate
     for line in llm_output.split('\n'):
         striped_line = line.strip()
-        
+
         # Check for start of JSON code block
         if striped_line.startswith("```json"):
             inside_json_block = True
             continue
-        
+
         # Check for end of code block
         if inside_json_block and striped_line.startswith("```"):
             # We've reached the closing triple backticks.
             inside_json_block = False
             break
-        
+
         # If we're inside the JSON block, collect the lines
         if inside_json_block:
             json_lines.append(line)
-    
+
     # If we never found a JSON code block, fallback to any JSON-like content
     if not json_lines:
         # Fallback: Try a regex that finds any JSON-like object in the text
@@ -346,7 +139,7 @@ def extract_json_between_markers(llm_output):
 
     # Join all lines in the JSON block into a single string
     json_string = "\n".join(json_lines).strip()
-    
+
     # Try to parse the collected JSON lines
     try:
         return json.loads(json_string)

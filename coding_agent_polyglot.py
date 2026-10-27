@@ -1,15 +1,11 @@
 import argparse
-import subprocess
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 import threading
 
-from llm_withtools import CLAUDE_MODEL, OPENAI_MODEL, chat_with_agent
-from utils.git_utils import diff_versus_commit, reset_to_commit, apply_patch
-
-# reset_to_commit(git_dname, commit)
-# apply_patch(git_dname, patch_str)
+from llm_withtools import chat_with_agent
+from utils.git_utils import diff_versus_commit
 
 # TEST COMMANDS for different languages
 # IMPORTANT: TEST COMMAND SHOULD BE RUN UNDER git_tempdir!!
@@ -112,8 +108,8 @@ class AgenticSystem:
         self.self_improve = self_improve
         self.language = language
 
-        # Set the code model based on whether self-improvement is enabled
-        self.code_model = CLAUDE_MODEL if not self_improve else OPENAI_MODEL
+        # The repo only supports the local LLM provider
+        self.code_model = 'local'
 
         # Initialize logger and store it in thread-local storage
         self.logger = setup_logger(chat_history_file)

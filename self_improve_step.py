@@ -11,7 +11,7 @@ from prompts.testrepo_prompt import get_test_description
 from swe_bench.harness import harness
 from polyglot.harness import harness as polyglot_harness
 from swe_bench.report import make_report
-from utils.common_utils import load_json_file
+from utils.common_utils import get_container_env, load_json_file
 from utils.evo_utils import get_model_patch_paths, get_all_performance, is_compiled_self_improve
 from utils.docker_utils import (
     build_dgm_container,
@@ -25,20 +25,24 @@ from utils.docker_utils import (
 )
 
 dataset = None
-diagnose_model = 'o1-2024-12-17'
+diagnose_model = 'local'
 
 def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
-    client = create_client(diagnose_model)
-    if polyglot:
-        diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
-            entry, commit, root_dir, out_dir, dataset,
-            patch_files=patch_files,
-        )
-    else:
-        diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_swe(
-            entry, commit, root_dir, out_dir, dataset,
-            patch_files=patch_files,
-        )
+    try:
+        client = create_client(diagnose_model)
+        if polyglot:
+            diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_polyglot(
+                entry, commit, root_dir, out_dir, dataset,
+                patch_files=patch_files,
+            )
+        else:
+            diagnose_sys_message, diagnose_prompt = get_diagnose_prompt_swe(
+                entry, commit, root_dir, out_dir, dataset,
+                patch_files=patch_files,
+            )
+    except Exception as e:
+        safe_log(f"Error preparing problem diagnosis with model '{diagnose_model}': {e}")
+        return None
     try:
         response, msg_history = get_response_from_llm(
             msg=diagnose_prompt,
@@ -86,11 +90,15 @@ def diagnose_improvement(
     Returns:
         dict: The improvement diagnosis.
     """
-    client = create_client(diagnose_model)
-    diagnose_sys_message, diagnose_prompt = get_diagnose_improvement_prompt(
-        entry, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
-        patch_files=patch_files,
-    )
+    try:
+        client = create_client(diagnose_model)
+        diagnose_sys_message, diagnose_prompt = get_diagnose_improvement_prompt(
+            entry, parent_commit, root_dir, model_patch_file, out_dir, run_id, dataset,
+            patch_files=patch_files,
+        )
+    except Exception as e:
+        safe_log(f"Error preparing improvement diagnosis with model '{diagnose_model}': {e}")
+        return None
     safe_log(f"Diagnosing the improvement: {diagnose_prompt}")
     try:
         response, msg_history = get_response_from_llm(
@@ -336,14 +344,7 @@ def self_improve(
     safe_log("Running self-improvement")
     chat_history_file_container = "/dgm/self_evo.md"
     test_description = get_test_description(swerepo=False)
-    env_vars = {
-        "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
-        "AWS_REGION": os.getenv('AWS_REGION'),
-        "AWS_REGION_NAME": os.getenv('AWS_REGION_NAME'),
-        "AWS_ACCESS_KEY_ID": os.getenv('AWS_ACCESS_KEY_ID'),
-        "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
-        "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
-    }
+    env_vars = get_container_env()
     cmd = [
         "timeout", "1800",  # 30min timeout
         "python", "/dgm/coding_agent.py",

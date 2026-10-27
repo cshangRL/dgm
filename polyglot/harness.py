@@ -15,6 +15,7 @@ from polyglot.test_spec import make_test_spec
 from polyglot.docker_build import build_env_images, build_container, cleanup_container
 from polyglot.constants import MAP_REPO_VERSION_TO_SPECS, TEST_COMMANDS
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
+from utils.common_utils import get_container_env
 
 from swe_bench.utils import (
     copy_to_container,
@@ -99,14 +100,7 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         log_container_output(exec_result)
 
         # Run the agent
-        env_vars = {
-            "ANTHROPIC_API_KEY": os.getenv('ANTHROPIC_API_KEY'),
-            "AWS_REGION": os.getenv('AWS_REGION'),
-            "AWS_REGION_NAME": os.getenv('AWS_REGION_NAME'),
-            "AWS_ACCESS_KEY_ID": os.getenv('AWS_ACCESS_KEY_ID'),
-            "AWS_SECRET_ACCESS_KEY": os.getenv('AWS_SECRET_ACCESS_KEY'),
-            "OPENAI_API_KEY": os.getenv('OPENAI_API_KEY'),
-        }
+        env_vars = get_container_env()
         safe_log("Running the agent")
         cmd = [
             "timeout", "600",  # 10 min timeout
@@ -278,7 +272,7 @@ def harness(
     # Ensure that necessary directories exist
     if model_name_or_path is None:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_name_or_path = f"{timestamp}--claude-3-5-sonnet-20241022"
+        model_name_or_path = f"{timestamp}--local"
     pred_dname = Path(pred_dname)
     pred_dname.mkdir(exist_ok=True)
     out_dnames = []
