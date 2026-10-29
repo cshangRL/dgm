@@ -38,12 +38,16 @@ def maybe_truncate(content: str, max_length: int = 10000) -> str:
         return content[:max_length] + "\n<response clipped>"
     return content
 
+ALLOWED_EDIT_ROOTS = (Path("/testbed"), Path("/dgm"))
+
+
 def validate_path(path: str, command: str) -> Path:
     """
     Validate the file path for each command:
       - 'view': path may be a file or directory; must exist.
       - 'create': path must not exist (for new file creation).
       - 'edit': path must exist (for overwriting).
+    Paths are confined to /testbed and /dgm; symlinks are resolved first.
     """
     path_obj = Path(path)
 
@@ -51,6 +55,16 @@ def validate_path(path: str, command: str) -> Path:
     if not path_obj.is_absolute():
         raise ValueError(
             f"The path {path} is not an absolute path (must start with '/')."
+        )
+
+    resolved = path_obj.resolve()
+    if not any(
+        resolved == root or root in resolved.parents
+        for root in ALLOWED_EDIT_ROOTS
+    ):
+        raise ValueError(
+            f"The path {path} is outside the allowed roots: "
+            f"{', '.join(str(root) for root in ALLOWED_EDIT_ROOTS)}."
         )
 
     if command == "view":
@@ -70,7 +84,7 @@ def validate_path(path: str, command: str) -> Path:
     else:
         raise ValueError(f"Unknown or unsupported command: {command}")
 
-    return path_obj
+    return resolved
 
 def format_output(content: str, path: str, init_line: int = 1) -> str:
     """Format output with line numbers (for file content)."""

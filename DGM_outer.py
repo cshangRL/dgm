@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import shutil
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed, TimeoutError
 
 from prompts.self_improvement_prompt import find_selfimprove_eval_logs
@@ -28,7 +29,11 @@ def initialize_run(output_dir, prevrun_dir=None, polyglot=False):
     initial_folder_name = 'initial' if not polyglot else 'initial_polyglot'
     if not prevrun_dir and not os.path.exists(f"{output_dir}/{initial_folder_name}"):
         if os.path.exists(initial_folder_name):
-            os.system(f"cp -r {initial_folder_name}/ {output_dir}/initial")
+            shutil.copytree(
+                initial_folder_name,
+                os.path.join(output_dir, "initial"),
+                dirs_exist_ok=True,
+            )
         else:
             raise RuntimeError("Error: Need to properly configure evaluation results for the initial version.")
     

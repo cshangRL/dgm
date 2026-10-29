@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import platform
 import re
+import shlex
 
 from dataclasses import dataclass
 from typing import Any, Union, cast
@@ -118,14 +120,14 @@ def make_repo_script_list(specs, repo, repo_directory, base_commit, env_name):
     This is the setup script for the instance image.
     """
     setup_commands = [
-        f"cd /{repo}",
-        f"git clone . {repo_directory}",
-        f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
-        f"cd {repo_directory}",
-        f"git reset --hard {base_commit}",
+        f"cd /{shlex.quote(repo)}",
+        f"git clone . {shlex.quote(repo_directory)}",
+        f"chmod -R u+rwX,go+rX {shlex.quote(repo_directory)}",  # read/execute for nonroot tests
+        f"cd {shlex.quote(repo_directory)}",
+        f"git reset --hard {shlex.quote(base_commit)}",
         # Make sure conda is available for later use
         "source /opt/miniconda3/bin/activate",
-        f"conda activate {env_name}",
+        f"conda activate {shlex.quote(env_name)}",
         'echo "Current environment: $CONDA_DEFAULT_ENV"',
     ]
     if repo in MAP_REPO_TO_INSTALL:
@@ -170,7 +172,6 @@ def make_env_script_list(instance: dict, specs: dict, env_name: str) -> list[str
     Returns:
         list[str]: List of commands to set up the conda environment
     """
-    HEREDOC_DELIMITER = "EOF_59812759871"
     reqs_commands = [
         "source /opt/miniconda3/bin/activate",
     ]
@@ -184,18 +185,20 @@ def make_env_script_list(instance: dict, specs: dict, env_name: str) -> list[str
         # Install dependencies
         reqs = replace_uninstallable_packages_requirements_txt(get_requirements(instance))
         path_to_reqs = "$HOME/requirements.txt"
+        encoded_reqs = base64.b64encode(reqs.encode()).decode()
         reqs_commands.append(
-            f"cat <<'{HEREDOC_DELIMITER}' > {path_to_reqs}\n{reqs}\n{HEREDOC_DELIMITER}"
+            f"printf %s {shlex.quote(encoded_reqs)} | base64 -d > {shlex.quote(path_to_reqs)}"
         )
-        cmd = f"conda activate {env_name} && python -m pip install -r {path_to_reqs}"
+        cmd = f"conda activate {shlex.quote(env_name)} && python -m pip install -r {shlex.quote(path_to_reqs)}"
         reqs_commands.append(cmd)
-        reqs_commands.append(f"rm {path_to_reqs}")
+        reqs_commands.append(f"rm {shlex.quote(path_to_reqs)}")
     elif pkgs == "environment.yml":
         # Create environment from yml
         reqs = get_environment_yml(instance, env_name)
         path_to_reqs = "environment.yml"
+        encoded_reqs = base64.b64encode(reqs.encode()).decode()
         reqs_commands.append(
-            f"cat <<'{HEREDOC_DELIMITER}' > {path_to_reqs}\n{reqs}\n{HEREDOC_DELIMITER}"
+            f"printf %s {shlex.quote(encoded_reqs)} | base64 -d > {shlex.quote(path_to_reqs)}"
         )
         if "no_use_env" in specs and specs["no_use_env"]:
             # `conda create` based installation
@@ -234,7 +237,6 @@ def make_eval_script_list(instance, specs, env_name, repo_directory, base_commit
     """
     Applies the test patch and runs the tests.
     """
-    HEREDOC_DELIMITER = "EOF_114329324912"
     test_files = re.findall(DIFF_MODIFIED_FILE_REGEX, test_patch)
 
     # Identify added files by looking for "new file mode" in the patch
@@ -245,30 +247,35 @@ def make_eval_script_list(instance, specs, env_name, repo_directory, base_commit
     # Build the reset command
     commands = []
     if modified_files:
-        commands.append(f"git checkout {base_commit} -- {' '.join(modified_files)}")
+        quoted_files = " ".join(shlex.quote(path) for path in modified_files)
+        commands.append(
+            f"git checkout {shlex.quote(base_commit)} -- {quoted_files}"
+        )
     if added_files:
-        commands.append(f"rm -f {' '.join(added_files)}")
+        quoted_files = " ".join(shlex.quote(path) for path in added_files)
+        commands.append(f"rm -f {quoted_files}")
     # Handle C++ test case
     if instance['language'] == 'cpp':
         commands.append("rm -rf build/")
 
     reset_tests_command = " && ".join(commands) if commands else "true"
 
+    encoded_test_patch = base64.b64encode(test_patch.encode()).decode()
     apply_test_patch_command = (
-        f"git apply -v - <<'{HEREDOC_DELIMITER}'\n{test_patch}\n{HEREDOC_DELIMITER}"
+        f"printf %s {shlex.quote(encoded_test_patch)} | base64 -d | git apply -v -"
     )
     language = instance['language']
     test_command = MAP_REPO_VERSION_TO_SPECS[language]["test_cmd"]
     eval_commands = [
         "source /opt/miniconda3/bin/activate",
-        f"conda activate {env_name}",
-        f"cd {repo_directory}",
+        f"conda activate {shlex.quote(env_name)}",
+        f"cd {shlex.quote(repo_directory)}",
     ]
     if "eval_commands" in specs:
         eval_commands += specs["eval_commands"]
     eval_commands += [
-        f"git config --global --add safe.directory {repo_directory}",  # for nonroot user
-        f"cd {repo_directory}",
+        f"git config --global --add safe.directory {shlex.quote(repo_directory)}",  # for nonroot user
+        f"cd {shlex.quote(repo_directory)}",
         # This is just informational, so we have a record
         "git status",
         "git show",

@@ -19,7 +19,16 @@ aider_polyglot.json
 output_selfimprove/
 output_dgm/
 output_peer_review/
+output_test/
 initial_polyglot/
+final_results/
+*.log
+chat_history*.md
+dgm_metadata.jsonl
+
+<!-- host-only history and docs -->
+.git/
+doc/
 
 <!-- misc -->
 misc/

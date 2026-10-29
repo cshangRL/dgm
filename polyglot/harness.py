@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 import tempfile
 from enum import Enum
 import re
@@ -16,6 +17,13 @@ from polyglot.docker_build import build_env_images, build_container, cleanup_con
 from polyglot.constants import MAP_REPO_VERSION_TO_SPECS, TEST_COMMANDS
 from utils.git_utils import filter_patch_by_files, remove_patch_by_files
 from utils.common_utils import get_container_env
+from utils.security_utils import (
+    MAX_LOG_BYTES,
+    MAX_PATCH_BYTES,
+    truncate_bytes,
+    validate_git_commit,
+    validate_instance_id,
+)
 
 from swe_bench.utils import (
     copy_to_container,
@@ -34,11 +42,13 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
     Process a single dataset entry. This function encapsulates the main processing logic
     for each entry to make it suitable for parallel execution.
     """
-    instance_id = entry['instance_id']
+    instance_id = validate_instance_id(entry['instance_id'])
     problem_statement = entry['problem_statement']
     base_commit = entry['base_commit']
-    chat_history_file = out_dname / (instance_id + ".md")
-    out_fname = out_dname / (instance_id + ".json")
+    out_dname = Path(out_dname)
+    out_dname.mkdir(parents=True, exist_ok=True)
+    chat_history_file = out_dname / f"{instance_id}.md"
+    out_fname = out_dname / f"{instance_id}.json"
     eval_file = out_dname / f"{instance_id}_eval.sh"
     eval_result_file = out_dname / f"{instance_id}_eval.md"
 
@@ -120,18 +130,31 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         logger.info("Copying output files back to host")
         copy_from_container(container, chat_history_file_container, chat_history_file)
         # Additional chat history files
-        exec_result = container.exec_run(f"find /dgm/ -name '{instance_id}_*.md'", workdir='/')
-        chat_history_files_container = exec_result.output.decode().split()
+        exec_result = container.exec_run(
+            f"find /dgm/ -name {shlex.quote(instance_id + '_*.md')}",
+            workdir='/',
+        )
+        chat_history_files_container = truncate_bytes(
+            exec_result.output, MAX_LOG_BYTES
+        ).decode(errors="replace").split()
         for chat_history_file_container in chat_history_files_container:
             chat_history_file = out_dname / Path(chat_history_file_container).name
             copy_from_container(container, chat_history_file_container, chat_history_file)
 
         # Get model_patch
         logger.info("Getting model_patch")
+        size_result = container.exec_run("stat -c '%s' /dgm/model_patch.diff")
+        log_container_output(size_result)
+        patch_size = int(size_result.output.decode().strip() or "0")
+        if patch_size > MAX_PATCH_BYTES:
+            raise ValueError(
+                f"model_patch.diff exceeds {MAX_PATCH_BYTES} bytes ({patch_size})"
+            )
         exec_result = container.exec_run("cat /dgm/model_patch.diff")
         log_container_output(exec_result)
-        model_patch = ''
-        model_patch = exec_result.output.decode()
+        model_patch = truncate_bytes(
+            exec_result.output, MAX_PATCH_BYTES
+        ).decode(errors="replace")
 
         # Additional proposed model patches
         proposed_model_patches = []
@@ -152,9 +175,21 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
             return {"success": True, "instance_id": instance_id, "eval_result": eval_result}
     
 
-        exec_result = container.exec_run("git -C /testbed stash push " + " ".join(entry['files']['solution']), workdir='/')
+        solution_files = entry['files']['solution']
+        if isinstance(solution_files, str):
+            solution_files = [solution_files]
+        quoted_solution_files = " ".join(
+            shlex.quote(str(path)) for path in solution_files
+        )
+        exec_result = container.exec_run(
+            f"git -C /testbed stash push -- {quoted_solution_files}".rstrip(),
+            workdir='/',
+        )
         log_container_output(exec_result)
-        exec_result = container.exec_run(f"git -C /testbed reset --hard {entry['test_commit']}", workdir='/')
+        test_commit = validate_git_commit(entry['test_commit'])
+        exec_result = container.exec_run(
+            f"git -C /testbed reset --hard {test_commit}", workdir='/'
+        )
         log_container_output(exec_result)
         exec_result = container.exec_run(f"git -C /testbed clean -fd", workdir='/')
         log_container_output(exec_result)
@@ -175,7 +210,9 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
 
         exec_result = container.exec_run("timeout 120 ./eval.sh", workdir='/testbed')
         log_container_output(exec_result, raise_error=False)
-        eval_result_file.write_text(exec_result.output.decode())
+        eval_result_file.write_text(
+            truncate_bytes(exec_result.output, MAX_LOG_BYTES).decode(errors="replace")
+        )
         if exec_result.exit_code == 0:
             eval_result = 'resolved'
         else:

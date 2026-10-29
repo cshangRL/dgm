@@ -3,7 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 
 
 def load_predictions(paths):
@@ -34,33 +36,90 @@ def load_predictions(paths):
 
     return predictions
 
+TEST_DIR_NAMES = {"test", "tests", "testing"}
+TEST_INFRA_FILES = {
+    "conftest.py",
+    "pytest.ini",
+    "setup.cfg",
+    "tox.ini",
+    "pyproject.toml",
+    "noxfile.py",
+}
+
+
+def _strip_diff_prefix(path: str) -> str:
+    path = path.strip().split("\t", 1)[0]
+    if path.startswith(("a/", "b/")):
+        path = path[2:]
+    if path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _is_test_path(path: str) -> bool:
+    """True for test directories, test files, and test-runner configuration."""
+    path = _strip_diff_prefix(path)
+    if path == "/dev/null":
+        return False
+    parts = Path(path).parts
+    if not parts:
+        return False
+    if any(part in TEST_DIR_NAMES for part in parts[:-1]):
+        return True
+    if any(part.startswith("test_") for part in parts[:-1]):
+        return True
+    basename = parts[-1]
+    if basename in TEST_INFRA_FILES:
+        return True
+    if basename.startswith("test_"):
+        return True
+    return False
+
+
+def _diff_section_paths(section):
+    paths = []
+    for line in section:
+        if line.startswith("diff --git "):
+            match = re.match(r"diff --git a/(.+?) b/(.+)$", line.rstrip("\n"))
+            if match:
+                paths.extend([match.group(1), match.group(2)])
+        elif line.startswith("--- ") or line.startswith("+++ "):
+            paths.append(line[4:])
+    return paths
+
+
 def remove_patches_to_tests(model_patch):
     """
-    Remove any changes to the tests directory from the provided patch.
-    This is to ensure that the model_patch does not disturb the repo's
-    tests when doing acceptance testing with the `test_patch`.
+    Remove any changes to tests or test-runner configuration from the patch.
+
+    The previous version only looked at the `diff --git` header and only
+    matched a handful of directory names, so a root `conftest.py`,
+    `pytest.ini`, `setup.cfg`, or `pyproject.toml` could survive and force
+    private tests to pass. This version inspects both the header and the
+    `---`/`+++` paths and drops the entire diff section if any path is test
+    infrastructure.
     """
     lines = model_patch.splitlines(keepends=True)
-    filtered_lines = []
-    is_tests = False
+    preamble = []
+    sections = []
+    current = None
 
     for line in lines:
-        if line.startswith("diff --git a/"):
-            pieces = line.split()
-            to = pieces[-1]
-            if to.startswith("b/") and (
-                    "/test/" in to
-                    or "/tests/" in to
-                    or "/testing/" in to
-                    or "/test_" in to
-                    or "/tox.ini" in to
-            ):
-                is_tests = True
-            else:
-                is_tests = False
+        if line.startswith("diff --git "):
+            if current is not None:
+                sections.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        else:
+            preamble.append(line)
+    if current is not None:
+        sections.append(current)
 
-        if not is_tests:
-            filtered_lines.append(line)
+    filtered_lines = list(preamble)
+    for section in sections:
+        if not any(_is_test_path(path) for path in _diff_section_paths(section)):
+            filtered_lines.extend(section)
 
     return "".join(filtered_lines)
 
@@ -81,17 +140,19 @@ def preds_to_jsonl(dname, predictions):
     return predictions_jsonl
 
 def run_evals(predictions_jsonl, run_id, dataset_name, root_dir, output_dir, num_eval_procs=5):
-    os.chdir(output_dir)  # switch dir so that things will be saved in the specified output_dir
-    run_evals_cmd = f"""
-python {os.path.join(root_dir, './swe_bench/SWE-bench/swebench/harness/run_evaluation.py')}
-    --dataset_name {dataset_name}
-    --predictions_path {predictions_jsonl}
-    --max_workers {num_eval_procs}
-    --run_id {run_id}
-"""
-    run_evals_cmd = " ".join([line.strip() for line in run_evals_cmd.split() if line.strip()])
-    subprocess.run(run_evals_cmd.split(), check=True)
-    os.chdir(root_dir)  # switch back to the original directory
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions_jsonl = str(Path(predictions_jsonl).resolve())
+    evaluation_script = Path(root_dir).resolve() / "swe_bench" / "SWE-bench" / "swebench" / "harness" / "run_evaluation.py"
+    argv = [
+        sys.executable,
+        str(evaluation_script),
+        "--dataset_name", dataset_name,
+        "--predictions_path", predictions_jsonl,
+        "--max_workers", str(num_eval_procs),
+        "--run_id", run_id,
+    ]
+    subprocess.run(argv, check=True, cwd=str(output_dir))
 
 def make_report(
         dnames,

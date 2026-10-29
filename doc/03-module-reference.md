@@ -139,8 +139,9 @@ Traps:
 
 | File | Key symbols | Notes |
 |---|---|---|
-| `common_utils.py` | `read_file` (strips), `load_json_file` | Trivial; used everywhere. |
-| `docker_utils.py` | thread-local `setup_logger`/`safe_log`, `remove_existing_container`, `create_archive`, `build_dgm_container`, `cleanup_container`, `copy_to_container`, `copy_from_container`, `log_container_output` | `build_dgm_container` returns `None` on failure and callers do not check. `log_container_output` raises on non-zero exit. |
+| `common_utils.py` | `read_file` (strips), `load_json_file`, `get_container_env` | Trivial; `get_container_env` never forwards the host LLM key by default. |
+| `security_utils.py` | `validate_instance_id`, `validate_git_commit`, `redact_url`, `safe_extract_tar`, `safe_extract_single_file`, `truncate_bytes` | Host/container trust boundary: rejects tar links/traversal, caps archives/patches/logs. |
+| `docker_utils.py` | thread-local `setup_logger`/`safe_log`, `remove_existing_container`, `create_archive`, `build_dgm_container`, `cleanup_container`, `copy_to_container`, `copy_from_container`, `log_container_output` | `build_dgm_container` returns `None` on failure and callers do not check; the agent container gets `cap_drop=ALL`, `no-new-privileges`, and resource limits. `log_container_output` raises on non-zero exit and caps logged bytes. |
 | `evo_utils.py` | `load_dgm_metadata`, `get_model_patch_paths`, `get_all_performance`, `is_compiled_self_improve` | `load_dgm_metadata` splits on `'\n{'`, not a JSON parser. |
 | `git_utils.py` | `get_git_commit_hash`, `apply_patch`, `diff_versus_commit`, `reset_to_commit`, `filter_patch_by_files`, `remove_patch_by_files` | `diff_versus_commit` appends `--no-index` diffs for untracked files. `apply_patch` only prints on failure, never raises. |
 | `eval_utils.py` | `parse_eval_output`, `msg_history_to_report`, `get_report_score` | Legacy SWE log-parsing helpers; not called by the current agent loop. |

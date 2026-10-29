@@ -29,7 +29,8 @@ Environment variables (the container gets a subset of these forwarded by `self_i
 | Variable | Used by |
 |---|---|
 | `LOCAL_LLM_BASE_URL` | Host and containers; default `http://mydgx0:8888/v1` |
-| `LOCAL_LLM_API_KEY` | Host and containers; default `local` |
+| `LOCAL_LLM_API_KEY` | Host only; default `local` |
+| `LOCAL_LLM_API_KEY_CONTAINER` | Host only; forwarded to containers as `LOCAL_LLM_API_KEY`; defaults to `local` |
 | `LOCAL_LLM_MODEL` | Host and containers; served model id, default `DeepSeek-V4.1-Flash-1017` |
 | `LOCAL_LLM_MAX_TOKENS` | Host and containers; output cap, default `8192` |
 | `LOCAL_LLM_DISABLE_THINKING` | Host and containers; default `1` (prevents reasoning-only empty responses) |

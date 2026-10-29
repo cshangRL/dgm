@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import docker
 import docker.errors
+import io
 import os
-import signal
+import shlex
 import tarfile
 import threading
 import time
@@ -13,8 +14,6 @@ import traceback
 from pathlib import Path
 
 from docker.models.containers import Container
-
-HEREDOC_DELIMITER = "EOF_1399519320"  # different from dataset HEREDOC_DELIMITERs!
 
 def copy_to_container(container: Container, src: Path, dst: Path):
     """
@@ -26,6 +25,8 @@ def copy_to_container(container: Container, src: Path, dst: Path):
         dst (Path): Destination file path in the container
     """
     # Check if destination path is valid
+    src = Path(src)
+    dst = Path(dst)
     if os.path.dirname(dst) == "":
         raise ValueError(
             f"Destination path parent directory cannot be empty!, dst: {dst}"
@@ -34,31 +35,41 @@ def copy_to_container(container: Container, src: Path, dst: Path):
     # temporary tar file
     tar_path = src.with_suffix(".tar")
     with tarfile.open(tar_path, "w") as tar:
-        tar.add(src, arcname=src.name)
+        # Use the destination name, not the source name, so the file lands at
+        # the requested path after Docker extracts the archive.
+        tar.add(src, arcname=dst.name)
 
     # get bytes for put_archive cmd
     with open(tar_path, "rb") as tar_file:
         data = tar_file.read()
 
     # Make directory if necessary
-    container.exec_run(f"mkdir -p {dst.parent}")
+    container.exec_run(f"mkdir -p {shlex.quote(str(dst.parent))}")
 
     # Send tar file to container and extract
-    container.put_archive(os.path.dirname(dst), data)
-    container.exec_run(f"tar -xf {dst}.tar -C {dst.parent}")
+    container.put_archive(str(dst.parent), data)
 
-    # clean up in locally and in container
+    # clean up locally
     tar_path.unlink()
-    container.exec_run(f"rm {dst}.tar")
 
 
 def write_to_container(container: Container, data: str, dst: Path):
     """
-    Write a string to a file in a docker container
+    Write a string to a file in a docker container.
+
+    Uses put_archive instead of a heredoc so data containing the delimiter
+    cannot terminate the heredoc and execute shell commands.
     """
-    # echo with heredoc to file
-    command = f"cat <<'{HEREDOC_DELIMITER}' > {dst}\n{data}\n{HEREDOC_DELIMITER}"
-    container.exec_run(command)
+    dst = Path(dst)
+    payload = data.encode("utf-8")
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w") as tar:
+        info = tarfile.TarInfo(name=dst.name)
+        info.size = len(payload)
+        info.mode = 0o644
+        tar.addfile(info, io.BytesIO(payload))
+    container.exec_run(f"mkdir -p {shlex.quote(str(dst.parent))}")
+    container.put_archive(str(dst.parent), archive.getvalue())
 
 
 def remove_image(client, image_id, logger=None):
@@ -113,8 +124,6 @@ def cleanup_container(client, container, logger):
     if not container:
         return
 
-    container_id = container.id
-
     if not logger:
         # if logger is None, print to stdout
         log_error = print
@@ -141,18 +150,11 @@ def cleanup_container(client, container, logger):
             f"Failed to stop container {container.name}: {e}. Trying to forcefully kill..."
         )
         try:
-            # Get the PID of the container
-            container_info = client.api.inspect_container(container_id)
-            pid = container_info["State"].get("Pid", 0)
-
-            # If container PID found, forcefully kill the container
-            if pid > 0:
-                log_info(
-                    f"Forcefully killing container {container.name} with PID {pid}..."
-                )
-                os.kill(pid, signal.SIGKILL)
-            else:
-                log_error(f"PID for container {container.name}: {pid} - not killing.")
+            # Kill through the Docker API. Never os.kill() a host PID reported
+            # by inspect: the container may have exited and the PID may have
+            # been reused by an unrelated host process.
+            container.kill()
+            log_info(f"Forcefully killed container {container.name}.")
         except Exception as e2:
             if raise_error:
                 raise e2

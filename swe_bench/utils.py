@@ -1,10 +1,19 @@
 import tarfile
 import io
 import logging
+import shlex
 import threading
 from typing import Union, Optional
 from pathlib import Path
 import docker
+
+from utils.security_utils import (
+    MAX_ARCHIVE_BYTES,
+    MAX_LOG_BYTES,
+    safe_extract_single_file,
+    safe_extract_tar,
+    truncate_bytes,
+)
 
 # Thread-local storage for loggers
 _thread_local = threading.local()
@@ -134,7 +143,7 @@ def copy_to_container(container, source_path: Union[str, Path], dest_path: Union
             archive = create_archive(source_path)
             
         # Create destination directory in container if it doesn't exist
-        container.exec_run(f"mkdir -p {container_dest_dir}")
+        container.exec_run(f"mkdir -p {shlex.quote(container_dest_dir)}")
 
         safe_log(f"Copying {source_path} to container at {dest_path}")
         success = container.put_archive(container_dest_dir, archive)
@@ -165,45 +174,52 @@ def copy_from_container(container, source_path: Union[str, Path], dest_path: Uni
     dest_path = Path(dest_path)
     
     try:
-        # Check if source exists in container
-        result = container.exec_run(f"test -e {source_path}")
+        # Check if source exists in container. Quote the path: it can contain
+        # characters that are meaningful to the container shell.
+        quoted_source = shlex.quote(str(source_path))
+        result = container.exec_run(f"test -e {quoted_source}")
         if result.exit_code and result.exit_code != 0:
             raise FileNotFoundError(f"Source path not found in container: {source_path}")
             
-        # Get file type from container
-        result = container.exec_run(f"stat -f '%HT' {source_path}")
-        is_file = result.output.decode().strip() == 'Regular File'
+        # GNU stat: the containers are Debian/Ubuntu. `stat -f` is BSD-only and
+        # always failed, forcing every copy through tar.extractall.
+        result = container.exec_run(f"stat -c '%F' {quoted_source}")
+        file_type = result.output.decode().strip().lower() if result.output else ""
+        is_file = file_type.startswith("regular")
             
         # Create destination directory if it doesn't exist
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         
         safe_log(f"Copying from container {source_path} to local path {dest_path}")
         
-        # Get archive from container
+        # Get archive from container, capping the number of bytes we buffer.
         bits, stat = container.get_archive(str(source_path))
+        chunks = []
+        total = 0
+        for chunk in bits:
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ValueError(
+                    f"Container archive exceeds {MAX_ARCHIVE_BYTES} bytes: {source_path}"
+                )
+            chunks.append(chunk)
+        archive_data = b"".join(chunks)
         
-        # Concatenate all chunks into a single bytes object
-        archive_data = b''.join(bits)
-        
-        # Extract to temporary stream
-        stream = io.BytesIO(archive_data)
-        
-        with tarfile.open(fileobj=stream, mode='r') as tar:
-            # If extracting a single file
-            if is_file:
-                member = tar.getmembers()[0]
-                with tar.extractfile(member) as source_file:
-                    data = source_file.read()
-                    # Write directly to destination file
-                    with open(dest_path, 'wb') as dest_file:
-                        dest_file.write(data)
-            else:
-                # For directories, extract to parent directory
-                tar.extractall(path=str(dest_path.parent))
-                # Rename if necessary
-                extracted_path = dest_path.parent / Path(stat['name']).name
-                if extracted_path != dest_path and extracted_path.exists():
-                    extracted_path.rename(dest_path)
+        if is_file:
+            safe_extract_single_file(
+                archive_data,
+                dest_path,
+                expected_name=Path(str(source_path)).name,
+            )
+        else:
+            safe_extract_tar(archive_data, dest_path.parent)
+            extracted_path = dest_path.parent / Path(stat['name']).name
+            if extracted_path != dest_path:
+                if not extracted_path.exists():
+                    raise FileNotFoundError(
+                        f"Archive did not contain expected path: {stat['name']}"
+                    )
+                extracted_path.rename(dest_path)
         
         safe_log(f"Successfully copied from container to {dest_path}")
         
@@ -218,12 +234,17 @@ def log_container_output(exec_result, raise_error=True):
     # Handle output logging
     if isinstance(exec_result.output, bytes):
         # Handle non-streaming output
-        safe_log(f"Container output: {exec_result.output.decode()}")
+        safe_log(f"Container output: {truncate_bytes(exec_result.output).decode(errors='replace')}")
     else:
-        # Handle streaming output
+        # Handle streaming output, bounding total bytes logged.
+        total = 0
         for chunk in exec_result.output:
             if chunk:
-                safe_log(f"Container output: {chunk.decode().strip()}")
+                if total >= MAX_LOG_BYTES:
+                    safe_log("Container output: ...[truncated by dgm security limit]...")
+                    break
+                total += len(chunk)
+                safe_log(f"Container output: {truncate_bytes(chunk, MAX_LOG_BYTES).decode(errors='replace').strip()}")
     
     # Check exit code
     if raise_error:

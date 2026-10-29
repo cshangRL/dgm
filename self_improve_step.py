@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+import shutil
 import docker
 
 from llm import create_client, get_response_from_llm, extract_json_between_markers
@@ -26,6 +27,27 @@ from utils.docker_utils import (
 
 dataset = None
 diagnose_model = 'local'
+
+def _response_leaks_test_patch(response_json, test_patch):
+    """Reject a diagnosis response that copies meaningful private-test lines."""
+    if not test_patch:
+        return False
+    response_text = " ".join(
+        str(response_json.get(key, ""))
+        for key in (
+            "log_summarization",
+            "potential_improvements",
+            "improvement_proposal",
+            "implementation_suggestion",
+            "problem_description",
+        )
+    )
+    for line in test_patch.splitlines():
+        line = line.strip()
+        if len(line) >= 24 and line in response_text:
+            return True
+    return False
+
 
 def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attempts=3, polyglot=False):
     try:
@@ -55,6 +77,14 @@ def diagnose_problem(entry, commit, root_dir, out_dir, patch_files=[], max_attem
         safe_log(f"Message history: {msg_history}")
         response_json = extract_json_between_markers(response)
         assert response_json, "empty response json"
+        private_tests = ""
+        entry_record = next(
+            (item for item in dataset if item.get("instance_id") == entry), None
+        )
+        if entry_record:
+            private_tests = entry_record.get("test_patch") or entry_record.get("reference_tests", "")
+        if _response_leaks_test_patch(response_json, private_tests):
+            raise ValueError("diagnosis response contains private test patch content")
         problem_statement = get_problem_description_prompt(response_json, polyglot)
     except Exception as e:
         # Exception most probably due to not having json in the response
@@ -432,7 +462,8 @@ def main():
     args = parser.parse_args()
 
     # Copy cached initial version into experiment dir
-    os.system(f"cp -r initial/ {args.output_dir}")
+    os.makedirs(args.output_dir, exist_ok=True)
+    shutil.copytree("initial", os.path.join(args.output_dir, "initial"), dirs_exist_ok=True)
 
     metadata = self_improve(
         parent_commit=args.parent_commit,

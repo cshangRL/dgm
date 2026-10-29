@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import traceback
 import docker
@@ -538,6 +539,9 @@ def build_container(
             command="tail -f /dev/null",
             nano_cpus=nano_cpus,
             platform=test_spec.platform,
+            security_opt=["no-new-privileges"],
+            mem_limit=os.getenv("DGM_EVAL_MEM_LIMIT", "8g"),
+            pids_limit=int(os.getenv("DGM_EVAL_PIDS_LIMIT", "1024")),
         )
         logger.info(f"Container for {test_spec.instance_id} created: {container.id}")
         return container

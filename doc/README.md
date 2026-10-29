@@ -9,6 +9,7 @@ Docs for reading the Darwin Gödel Machine repo (`/Users/dongsheng/retry/dgm`). 
 | 3 | [`03-module-reference.md`](03-module-reference.md) | Per-file map: key functions, inputs, side effects, traps | reference |
 | 4 | [`04-running-and-debugging.md`](04-running-and-debugging.md) | Commands, env vars, output layout, failure triage | reference |
 | 5 | [`05-local-llm.md`](05-local-llm.md) | Local LLM configuration, networking, and reasoning-model caveats | when running the loop |
+| 6 | [`06-security.md`](06-security.md) | Security findings, fixes applied, and residual risks | reference |
 
 ## One-paragraph mental model
 

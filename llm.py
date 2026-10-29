@@ -6,6 +6,8 @@ import re
 import backoff
 import openai
 
+from utils.security_utils import redact_url
+
 # The repo only supports a local LLM endpoint (Chat Completions compatible).
 LOCAL_LLM_BASE_URL = os.getenv("LOCAL_LLM_BASE_URL", "http://mydgx0:8888/v1")
 LOCAL_LLM_API_KEY = os.getenv("LOCAL_LLM_API_KEY", "local")
@@ -55,7 +57,7 @@ def create_client(model: str = "local"):
         )
     base_url = os.getenv("LOCAL_LLM_BASE_URL", LOCAL_LLM_BASE_URL)
     api_key = os.getenv("LOCAL_LLM_API_KEY", LOCAL_LLM_API_KEY)
-    print(f"Using local LLM endpoint {base_url} with model {local_model_id(model)}.")
+    print(f"Using local LLM endpoint {redact_url(base_url)} with model {local_model_id(model)}.")
     return openai.OpenAI(base_url=base_url, api_key=api_key), model
 
 

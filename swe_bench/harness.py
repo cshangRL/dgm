@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import docker
@@ -20,17 +21,20 @@ from swe_bench.utils import (
     setup_logger,
 )
 from utils.common_utils import get_container_env, load_json_file
+from utils.security_utils import MAX_LOG_BYTES, MAX_PATCH_BYTES, truncate_bytes, validate_instance_id
 
 def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
     """
     Process a single dataset entry. This function encapsulates the main processing logic
     for each entry to make it suitable for parallel execution.
     """
-    instance_id = entry['instance_id']
+    instance_id = validate_instance_id(entry['instance_id'])
     problem_statement = entry['problem_statement']
     base_commit = entry['base_commit']
-    chat_history_file = out_dname / (instance_id + ".md")
-    out_fname = out_dname / (instance_id + ".json")
+    out_dname = Path(out_dname)
+    out_dname.mkdir(parents=True, exist_ok=True)
+    chat_history_file = out_dname / f"{instance_id}.md"
+    out_fname = out_dname / f"{instance_id}.json"
     eval_file = out_dname / f"{instance_id}_eval.sh"
 
     # Skip if output result already exists
@@ -131,25 +135,49 @@ def process_entry(entry, out_dname, model_name_or_path, model_patch_paths):
         logger.info("Copying output files back to host")
         copy_from_container(container, chat_history_file_container, chat_history_file)
         # Additional chat history files
-        exec_result = container.exec_run(f"find /dgm/ -name '{instance_id}_*.md'", workdir='/')
-        chat_history_files_container = exec_result.output.decode().split()
+        exec_result = container.exec_run(
+            f"find /dgm/ -name {shlex.quote(instance_id + '_*.md')}",
+            workdir='/',
+        )
+        chat_history_files_container = truncate_bytes(
+            exec_result.output, MAX_LOG_BYTES
+        ).decode(errors="replace").split()
         for chat_history_file_container in chat_history_files_container:
             chat_history_file = out_dname / Path(chat_history_file_container).name
             copy_from_container(container, chat_history_file_container, chat_history_file)
 
         # Get model_patch
         logger.info("Getting model_patch")
+        size_result = container.exec_run("stat -c '%s' /dgm/model_patch.diff")
+        log_container_output(size_result)
+        patch_size = int(size_result.output.decode().strip() or "0")
+        if patch_size > MAX_PATCH_BYTES:
+            raise ValueError(
+                f"model_patch.diff exceeds {MAX_PATCH_BYTES} bytes ({patch_size})"
+            )
         exec_result = container.exec_run("cat /dgm/model_patch.diff")
         log_container_output(exec_result)
-        model_patch = exec_result.output.decode()
+        model_patch = truncate_bytes(exec_result.output, MAX_PATCH_BYTES).decode(errors="replace")
         # Additional proposed model patches
         proposed_model_patches = []
         exec_result = container.exec_run("find /dgm/ -name 'model_patch_*.diff'", workdir='/')
-        model_patch_files_container = exec_result.output.decode().split()
+        model_patch_files_container = truncate_bytes(
+            exec_result.output, MAX_LOG_BYTES
+        ).decode(errors="replace").split()
         for model_patch_file_container in model_patch_files_container:
-            exec_result = container.exec_run(f"cat {model_patch_file_container}")
+            quoted_patch = shlex.quote(model_patch_file_container)
+            size_result = container.exec_run(f"stat -c '%s' -- {quoted_patch}")
+            log_container_output(size_result)
+            patch_size = int(size_result.output.decode().strip() or "0")
+            if patch_size > MAX_PATCH_BYTES:
+                raise ValueError(
+                    f"{model_patch_file_container} exceeds {MAX_PATCH_BYTES} bytes ({patch_size})"
+                )
+            exec_result = container.exec_run(f"cat -- {quoted_patch}")
             log_container_output(exec_result)
-            proposed_model_patch = exec_result.output.decode()
+            proposed_model_patch = truncate_bytes(
+                exec_result.output, MAX_PATCH_BYTES
+            ).decode(errors="replace")
             proposed_model_patches.append(proposed_model_patch)
 
         # Write result to file

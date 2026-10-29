@@ -15,12 +15,16 @@ export LOCAL_LLM_DISABLE_THINKING='1'                  # 0 keeps reasoning enabl
 
 # Only if containers cannot reach mydgx0 directly (see Networking):
 export LOCAL_LLM_BASE_URL_CONTAINER='http://host.docker.internal:8899/v1'
+
+# Only if the container endpoint requires auth (otherwise containers get "local"):
+# export LOCAL_LLM_API_KEY_CONTAINER='...'
 ```
 
 | Variable | Default | Consumed by | Effect |
 |---|---|---|---|
 | `LOCAL_LLM_BASE_URL` | `http://mydgx0:8888/v1` | host + containers | endpoint URL |
-| `LOCAL_LLM_API_KEY` | `local` | host + containers | `api_key` for the Chat Completions client |
+| `LOCAL_LLM_API_KEY` | `local` | host only | `api_key` for the host Chat Completions client |
+| `LOCAL_LLM_API_KEY_CONTAINER` | unset → `local` | host, forwarded as `LOCAL_LLM_API_KEY` | explicit key for containers; set only if the server requires auth |
 | `LOCAL_LLM_MODEL` | `DeepSeek-V4.1-Flash-1017` | host + containers | served model id used for the `local` selector |
 | `LOCAL_LLM_MAX_TOKENS` | `8192` | host + containers | output cap per request |
 | `LOCAL_LLM_DISABLE_THINKING` | `1` | host + containers | sends `chat_template_kwargs={"enable_thinking": false}`; prevents reasoning-only empty responses |
